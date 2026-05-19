@@ -210,7 +210,7 @@
 
       <div class="field">
         <label for="promptFile">Prompt file</label>
-        <input id="promptFile" type="file" accept=".txt,.csv,text/plain,text/csv">
+        <input id="promptFile" type="file" accept=".txt,.csv,.jpg,.jpeg,.png,text/plain,text/csv,image/jpeg,image/png">
         <p class="hint">Use a text or CSV file with one prompt per line.</p>
       </div>
 
@@ -226,7 +226,7 @@
 
       <div class="field">
         <label for="modelName">Model name</label>
-        <input id="modelName" type="text" value="qwen3.5-0.8b" placeholder="qwen3.5-0.8b (LM Studio), gemini-2.5-flash (Google AI Studio), meta-llama/llama-3.3-70b-instruct:free (OpenRouter)">
+        <input id="modelName" type="text" value="qwen3.5-0.8b" placeholder="qwen3.5-0.8b (LM Studio), qwen2.5-vl-7b (LM Studio vision), gemini-2.5-flash (Google AI Studio), meta-llama/llama-3.3-70b-instruct:free (OpenRouter), qwen/qwen2.5-vl-72b-instruct:free (OpenRouter vision)">
       </div>
 
       <div class="actions">
@@ -267,6 +267,15 @@
       });
     }
 
+    function readFileAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Could not read the selected image."));
+        reader.readAsDataURL(file);
+      });
+    }
+
     function parsePromptLines(text) {
       return text
         .replace(/^\uFEFF/, "")
@@ -282,7 +291,15 @@
       return encodedPrompts ? parsePromptLines(encodedPrompts) : [];
     }
 
-    async function callModel(systemPrompt, userPrompt, modelName, apiUrl, apiKey) {
+    function isImageFile(file) {
+      return Boolean(file && (
+        file.type === "image/jpeg" ||
+        file.type === "image/png" ||
+        /\.(jpe?g|png)$/i.test(file.name)
+      ));
+    }
+
+    async function callChatCompletion(messages, modelName, apiUrl, apiKey) {
       let response;
       const headers = {
         "Content-Type": "application/json"
@@ -298,10 +315,7 @@
           headers,
           body: JSON.stringify({
             model: modelName,
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userPrompt }
-            ]
+            messages
           })
         });
       } catch (error) {
@@ -329,6 +343,25 @@
       }
 
       return data.choices[0].message.content || data.choices[0].message.reasoning_content || "";
+    }
+
+    async function callModel(systemPrompt, userPrompt, modelName, apiUrl, apiKey) {
+      return callChatCompletion([
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ], modelName, apiUrl, apiKey);
+    }
+
+    async function callImageModel(userText, imageDataUrl, modelName, apiUrl, apiKey) {
+      return callChatCompletion([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: userText },
+            { type: "image_url", image_url: { url: imageDataUrl } }
+          ]
+        }
+      ], modelName, apiUrl, apiKey);
     }
 
     function renderResult(result) {
@@ -422,6 +455,34 @@
       runStartedAt = Date.now();
 
       try {
+        if (file && isImageFile(file)) {
+          setStatus("Processing image...");
+
+          const imageDataUrl = await readFileAsDataUrl(file);
+          const imagePrompt = systemPromptInput.value.trim() || "Transcribe this image as accurately as you can.";
+          let responseText;
+
+          try {
+            responseText = await callImageModel(imagePrompt, imageDataUrl, modelName, apiUrl, apiKey);
+          } catch (error) {
+            responseText = error && error.message ? `Error: ${error.message}` : "Error: Request failed.";
+          }
+
+          const result = {
+            row_number: 1,
+            input: file.name,
+            response: responseText
+          };
+
+          results.push(result);
+          renderResult(result);
+
+          const elapsedSeconds = Math.max(1, Math.round((Date.now() - runStartedAt) / 1000));
+          setStatus(`Done. Processed 1 image in ${elapsedSeconds}s.`);
+          downloadButton.style.display = "inline-flex";
+          return;
+        }
+
         const text = file ? await readFileAsText(file) : "";
         const prompts = file ? parsePromptLines(text) : testPrompts;
 

@@ -210,8 +210,8 @@
 
       <div class="field">
         <label for="promptFile">Prompt file</label>
-        <input id="promptFile" type="file" accept=".txt,.csv,.jpg,.jpeg,.png,text/plain,text/csv,image/jpeg,image/png">
-        <p class="hint">Use a text or CSV file with one prompt per line.</p>
+        <input id="promptFile" type="file" accept=".txt,.csv,.jpg,.jpeg,.png,.pdf,text/plain,text/csv,image/jpeg,image/png,application/pdf">
+        <p class="hint">Use a text or CSV file with one prompt per line. Images and PDFs are processed as single files.</p>
       </div>
 
       <div class="field">
@@ -239,7 +239,12 @@
     </section>
   </main>
 
+  <script src="./pdf.min.js"></script>
   <script>
+    if (window.pdfjsLib) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.js";
+    }
+
     const systemPromptInput = document.getElementById("systemPrompt");
     const promptFileInput = document.getElementById("promptFile");
     const apiUrlInput = document.getElementById("apiUrl");
@@ -276,6 +281,15 @@
       });
     }
 
+    function readFileAsArrayBuffer(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Could not read the selected PDF."));
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
     function parsePromptLines(text) {
       return text
         .replace(/^\uFEFF/, "")
@@ -297,6 +311,41 @@
         file.type === "image/png" ||
         /\.(jpe?g|png)$/i.test(file.name)
       ));
+    }
+
+    function isPdfFile(file) {
+      return Boolean(file && (
+        file.type === "application/pdf" ||
+        /\.pdf$/i.test(file.name)
+      ));
+    }
+
+    async function extractPdfText(file) {
+      if (!window.pdfjsLib) {
+        throw new Error("PDF.js did not load. Check your internet connection and try again.");
+      }
+
+      const buffer = await readFileAsArrayBuffer(file);
+      const pdf = await window.pdfjsLib.getDocument({ data: buffer }).promise;
+      const pageTexts = [];
+
+      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+        setStatus(`Extracting PDF page ${pageNumber} of ${pdf.numPages}...`);
+
+        const page = await pdf.getPage(pageNumber);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items
+          .map((item) => item.str)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (pageText) {
+          pageTexts.push(pageText);
+        }
+      }
+
+      return pageTexts.join("\n\n").trim();
     }
 
     async function callChatCompletion(messages, modelName, apiUrl, apiKey) {
@@ -432,18 +481,19 @@
       const apiKey = apiKeyInput.value.trim();
       const modelName = modelNameInput.value.trim();
       const testPrompts = getTestPrompts();
+      const selectedFileIsPdf = file && isPdfFile(file);
 
       if (!file && testPrompts.length === 0) {
-        setStatus("Choose a .txt or .csv file first.", true);
+        setStatus("Choose a .txt, .csv, image, or PDF file first.", true);
         return;
       }
 
-      if (!modelName) {
+      if (!selectedFileIsPdf && !modelName) {
         setStatus("Enter a model name before running.", true);
         return;
       }
 
-      if (!apiUrl) {
+      if (!selectedFileIsPdf && !apiUrl) {
         setStatus("Enter an API URL before running.", true);
         return;
       }
@@ -455,6 +505,32 @@
       runStartedAt = Date.now();
 
       try {
+        if (file && isPdfFile(file)) {
+          setStatus("Extracting PDF text...");
+
+          let extractedText;
+
+          try {
+            extractedText = await extractPdfText(file);
+          } catch (error) {
+            extractedText = error && error.message ? `Error: ${error.message}` : "Error: PDF extraction failed.";
+          }
+
+          const result = {
+            row_number: 1,
+            input: file.name,
+            response: extractedText || "No selectable text found in this PDF."
+          };
+
+          results.push(result);
+          renderResult(result);
+
+          const elapsedSeconds = Math.max(1, Math.round((Date.now() - runStartedAt) / 1000));
+          setStatus(`Done. Extracted text from 1 PDF in ${elapsedSeconds}s.`);
+          downloadButton.style.display = "inline-flex";
+          return;
+        }
+
         if (file && isImageFile(file)) {
           setStatus("Processing image...");
 
